@@ -62,25 +62,49 @@ def create_access_token(sub: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 
+def get_or_create_guest_user() -> dict:
+    """Return a shared guest user document for passwordless/anonymous usage."""
+    email = "guest@tenang.in"
+    user = db["user"].find_one({"email": email})
+    if not user:
+        create_document(
+            "user",
+            User(
+                name="Tamu",
+                email=email,
+                phone=None,
+                password_hash=hash_password("guest"),
+                provider="guest",
+                avatar_url=None,
+            ).model_dump(),
+        )
+        user = db["user"].find_one({"email": email})
+    user = user or {"email": email, "name": "Tamu"}
+    user["_id"] = str(user.get("_id", ""))
+    return user
+
+
 def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
+    """
+    If Authorization Bearer token is provided and valid, return that user.
+    Otherwise, fall back to a shared guest user so the app can be used tanpa login.
+    """
     if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
+        return get_or_create_guest_user()
     try:
         scheme, token = authorization.split(" ")
         if scheme.lower() != "bearer":
-            raise ValueError("Invalid auth scheme")
+            return get_or_create_guest_user()
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
         user_id = payload.get("sub")
-        # Lookup user
-        user = db["user"].find_one({"_id": {"$eq": db["user"].database.client.get_default_database().codec_options.uuid_representation if False else None}})
-        # Simpler: find by email (we store sub=email)
         user = db["user"].find_one({"email": user_id})
         if not user:
-            raise HTTPException(status_code=401, detail="User not found")
+            return get_or_create_guest_user()
         user["_id"] = str(user.get("_id"))
         return user
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        # Any token error => treat as guest instead of blocking
+        return get_or_create_guest_user()
 
 
 # ---------- Public Endpoints ----------
@@ -102,7 +126,7 @@ def test_database():
     return info
 
 
-# ---------- Auth Routes ----------
+# ---------- Auth Routes (kept for compatibility, not required by UI) ----------
 @app.post("/auth/register", response_model=TokenResponse)
 def register(payload: RegisterInput):
     if db["user"].find_one({"email": payload.email}):
@@ -129,23 +153,31 @@ def login(payload: LoginInput):
     return TokenResponse(access_token=token)
 
 
-# Placeholder for Google login (frontend will fetch Google token, exchange here later)
+# Placeholder for Google login
 class GoogleAuthInput(BaseModel):
     id_token: str
 
 @app.post("/auth/google", response_model=TokenResponse)
 def login_google(_: GoogleAuthInput):
-    # For MVP, we accept Google login toggle but not verifying real token yet.
-    # Create a mock user if not exists.
     email = "user.google@example.com"
     existing = db["user"].find_one({"email": email})
     if not existing:
-        create_document("user", User(name="Pengguna Google", email=email, phone=None, password_hash=hash_password("oauth"), provider="google").model_dump())
+        create_document(
+            "user",
+            User(
+                name="Pengguna Google",
+                email=email,
+                phone=None,
+                password_hash=hash_password("oauth"),
+                provider="google",
+                avatar_url=None,
+            ).model_dump(),
+        )
     token = create_access_token(email)
     return TokenResponse(access_token=token)
 
 
-# ---------- Protected Models ----------
+# ---------- Protected Models (now accept guest via get_current_user) ----------
 class MoodInput(BaseModel):
     date: Optional[datetime] = None
     mood_emoji: str
@@ -179,7 +211,7 @@ def list_moods(range: Optional[str] = None, user=Depends(get_current_user)):
         q["date"] = {"$gte": since}
     items = get_documents("mood", q)
     for it in items:
-        it["_id"] = str(it["_id"]) if "_id" in it else None
+        it["_id"] = str(it.get("_id")) if "_id" in it else None
     return items
 
 
